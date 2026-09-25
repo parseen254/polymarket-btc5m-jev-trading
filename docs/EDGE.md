@@ -37,6 +37,32 @@ Takers pay 0.07 × p × (1 − p) per share, and 20 % of that goes back to maker
 - **Why it lasts:** the edge is a service (liquidity) that the fee schedule structurally pays for. Competition compresses it, but it doesn't disappear the way a latency trick does.
 - **What it needs:** a CLOB websocket (book plus own fills), post-only GTC orders, cancel/replace, inventory limits, and a maker fill simulator for dry runs. That's a new broker and policy; the domain, session and settlement code here can stay.
 
+#### Attempt to disprove it (`npm run backtest:maker`)
+
+Method: replay every taker trade from `data-api.polymarket.com/trades` (3 days, 864 windows, 1.33 M trades, 41 M shares) against hypothetical resting bids on UP and DOWN. Buying DOWN is the same as selling UP, so this is a two-sided quote. Fills count only when the taker sold at or below our bid, and at-price fills get a queue share `q`. Positions are held to the official result. Makers pay no fee and get about 0.3 ¢/share in rebates.
+
+| Variant | Result |
+|---|---|
+| Bid at model − δ (model sets the price) | **Loses 7–10 ¢/share** at every δ and delay. The quote only gets hit when the market disagrees with the model, and the market is right more often. |
+| Join the market's best bid, capped at model − δ, no inventory limit | Roughly break-even (−1.4 to +0.8 ¢/share, \|t\| < 1.2). 65–90 % of the inventory is one-sided: sellers dump the side that's losing. |
+| Same, **inventory limit 20 shares** (stop bidding a side that leads by 20) | Positive. The result depends on requote delay (`L`, how stale the BTC price behind the cap is) and holds on each of the 3 days separately: |
+
+| Requote delay L (inv 20, δ 0.03–0.05) | day 1 | day 2 | day 3 |
+|---|---|---|---|
+| 0 s | +1.5–2.5 ¢/sh, t 2.3–3.5 | +1.6–2.9 ¢/sh, t 3.1–4.6 | +1.4–2.7 ¢/sh, t 2.1–3.5 |
+| **1 s** | +0.5–1.4 ¢/sh, t 1.1–2.0 | +0.8–1.9 ¢/sh, t 1.9–3.0 | +0.3–1.5 ¢/sh, t 0.8–2.0 |
+| 2 s | −0.6–+0.4 ¢/sh, t −0.4–0.8 | −0.3–+0.7 ¢/sh, t 0.0–1.3 | −0.6–+0.3 ¢/sh, t −0.4–0.7 |
+
+**Verdict: not disproven, but gated by speed.** Quoting at the market's bid with inventory control and a fast model cap made money on every day tested. The edge fades as the cap gets staler and is gone by 2 s. In practice that means Binance or Chainlink websockets, a CLOB websocket, and cancel/replace in well under a second. This bot's 5 s REST loop can't do it.
+
+What this backtest can't see, and what could still kill it:
+- **Queue position.** With no order-book data, at-price fills are a guess (`q`). The `q = 0` rows (strict price improvement only) are the conservative case.
+- **Competition.** Our bids would take fills from existing makers, and they would react.
+- **Cancel latency.** Polymarket's own cancel/match latency adds to `L`.
+- **Short sample.** 3 days, and parameters were picked on the same data.
+
+Next test: record the live L2 book over websocket and simulate queue position properly (paper maker). Then quote $1–2 live, because only real fills show the real queue.
+
 ### B. Read the settlement feed (supporting edge)
 
 Polymarket settles on Chainlink BTC/USD, and its real-time data service streams that feed without auth (`wss://ws-live-data.polymarket.com`, topic `crypto_prices_chainlink`, about 1 update/s). Using it instead of Binance removes the 11.4 % wrong-sign error on close windows. That helps quoting in A most in the final minute, when the book is thinnest and mistakes are most expensive.

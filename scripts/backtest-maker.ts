@@ -38,7 +38,7 @@ import {
  * makers pay no fee and get a rebate of rebateRate × feeRate × p(1−p) per share.
  *
  * Usage: tsx scripts/backtest-maker.ts [--days 3] [--deltas 0.01,0.02,0.03,0.05]
- *        [--lags 0,2,5] [--queues 0,0.1,0.25] [--inv 0,50,20] [--size 10] [--stop 20]
+ *        [--lags 0,2,5] [--queues 0,0.1,0.25] [--inv 0,50,20] [--size 10] [--stop 20] [--ago 0]
  *        [--rebate-rate 0.2] [--fee-rate 0.07]
  */
 
@@ -188,7 +188,8 @@ function simulate(
 }
 
 async function main(): Promise<void> {
-  const end = Math.floor(Date.now() / 1000 / 300) * 300 - 600;
+  // --ago shifts the test period back N days (out-of-sample checks).
+  const end = Math.floor(Date.now() / 1000 / 300) * 300 - 600 - arg("--ago", 0) * 86_400;
   const start = end - days * 86_400;
   const all: number[] = [];
   for (let ts = start; ts < end; ts += 300) all.push(ts);
