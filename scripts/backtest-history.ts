@@ -3,7 +3,19 @@ import { resolve } from "node:path";
 import { fetchJson } from "../src/adapters/polymarket/wire.js";
 import { loadDotEnv } from "../src/loadEnv.js";
 import { takerFeePerShare } from "../src/policy.js";
-import { arg, argList, f3, klines, pct, phi, pool, sigmaPerSecBefore, table } from "./lib/history.js";
+import {
+  arg,
+  argList,
+  f3,
+  fairUp,
+  klines,
+  pct,
+  pool,
+  rangeAverager,
+  sigmaPerSecBefore,
+  table,
+  twapFairUp,
+} from "./lib/history.js";
 
 /**
  * Historical check of a fair-value edge on BTC 5m Up/Down, no Jev calls.
@@ -18,7 +30,11 @@ import { arg, argList, f3, klines, pct, phi, pool, sigmaPerSecBefore, table } fr
  * previous hour of 1m returns. Then: does the model forecast better than the
  * market, where is the market miscalibrated, and does trading the gap survive fees?
  *
- * Usage: tsx scripts/backtest-history.ts [--days 2] [--spread 0.01] [--fee-rate 0.07] [--lags 0,5,15,30]
+ * The default `twap` model follows Polymarket's rule (Chainlink 60s TWAP at the close
+ * ≥ 60s TWAP at the open, computed here on Binance); `--model spot` compares spot prices.
+ *
+ * Usage: tsx scripts/backtest-history.ts [--days 2] [--spread 0.01] [--fee-rate 0.07]
+ *        [--lags 0,5,15,30] [--model twap|spot]
  */
 
 loadDotEnv();
@@ -31,6 +47,9 @@ const days = arg("--days", 2);
 const halfSpread = arg("--spread", 0.01);
 const feeRate = arg("--fee-rate", 0.07);
 const cachePath = resolve("data/backtest-cache.json");
+const fairModel = process.argv.includes("--model")
+  ? String(process.argv[process.argv.indexOf("--model") + 1])
+  : "twap";
 
 type Window = {
   ts: number;
@@ -87,7 +106,14 @@ async function main(): Promise<void> {
 
   const windows = all.map((ts) => cache[ts]).filter((w): w is Window => w != null && w.upPath.length > 0);
   console.error(`fetching Binance 1s/1m for ${days}d…`);
-  const [sec, min] = await Promise.all([klines("1s", start, end + 300), klines("1m", start - 3600, end + 300)]);
+  const [sec, min] = await Promise.all([klines("1s", start - 120, end + 300), klines("1m", start - 3600, end + 300)]);
+  const avg = rangeAverager(sec, start - 120, end + 300);
+  const priceAt = (w: Window, t: number, st: number, s0: number, sigma: number) => {
+    const tau = w.ts + 300 - t;
+    return fairModel === "twap"
+      ? twapFairUp({ st, k: s0, sigmaPerSec: sigma, tau, partial: tau < 60 ? avg(w.ts + 240, t + 1) : null })
+      : fairUp(st, s0, sigma, tau);
+  };
 
   type Obs = {
     w: Window;
@@ -101,15 +127,15 @@ async function main(): Promise<void> {
   };
   const obs: Obs[] = [];
   for (const w of windows) {
-    const s0 = sec.get(w.ts);
-    if (!s0) continue;
+    const s0 = fairModel === "twap" ? avg(w.ts - 60, w.ts) : sec.get(w.ts);
+    if (!s0 || !Number.isFinite(s0)) continue;
     const sigmaPerSec = sigmaPerSecBefore(min, w.ts);
     if (sigmaPerSec == null) continue;
     for (const h of w.upPath) {
       const tau = w.ts + 300 - h.t;
       const st = sec.get(h.t);
       if (!st || tau < 15) continue;
-      const model = phi(Math.log(st / s0) / (sigmaPerSec * Math.sqrt(tau)));
+      const model = priceAt(w, h.t, st, s0, sigmaPerSec);
       obs.push({ w, t: h.t, tau, mkt: h.p, model, y: w.winner === "UP" ? 1 : 0, s0, sigmaPerSec });
     }
   }
@@ -118,15 +144,19 @@ async function main(): Promise<void> {
     `${windows.length} resolved windows over ${days}d, ${obs.length} price points. UP won ${pct(upRate)}.\n`,
   );
 
-  // Binance vs Chainlink: how often does the Binance move point the wrong way?
-  let signN = 0, signBad = 0;
+  // Can Binance stand in for Chainlink? Compare its direction with the official result.
+  let signN = 0, spotBad = 0, twapBad = 0;
   for (const w of windows) {
     const a = sec.get(w.ts), b = sec.get(w.ts + 299);
-    if (!a || !b || w.priceToBeat == null) continue;
+    const k = avg(w.ts - 60, w.ts), x = avg(w.ts + 240, w.ts + 300);
+    if (!a || !b || !Number.isFinite(k) || !Number.isFinite(x)) continue;
     signN++;
-    if ((b >= a ? "UP" : "DOWN") !== w.winner) signBad++;
+    if ((b >= a ? "UP" : "DOWN") !== w.winner) spotBad++;
+    if ((x >= k ? "UP" : "DOWN") !== w.winner) twapBad++;
   }
-  console.log(`Binance open→close sign disagrees with official result in ${signBad}/${signN} windows (${pct(signBad / signN)}).\n`);
+  console.log(
+    `Binance direction vs official result: spot→spot wrong in ${pct(spotBad / signN)}, 60s avg→60s avg wrong in ${pct(twapBad / signN)} (${signN} windows).\n`,
+  );
 
   // 1) Forecast quality by time left.
   const buckets = [[240, 300], [180, 240], [120, 180], [60, 120], [15, 60]] as const;
@@ -165,7 +195,7 @@ async function main(): Promise<void> {
         if (seen.has(o.w.ts) || o.tau < 90) continue;
         const st = sec.get(o.t - lag);
         if (!st) continue;
-        const model = phi(Math.log(st / o.s0) / (o.sigmaPerSec * Math.sqrt(o.tau)));
+        const model = priceAt(o.w, o.t - lag, st, o.s0, o.sigmaPerSec);
         for (const side of ["UP", "DOWN"] as const) {
           const ask = (side === "UP" ? o.mkt : 1 - o.mkt) + halfSpread;
           const p = side === "UP" ? model : 1 - model;

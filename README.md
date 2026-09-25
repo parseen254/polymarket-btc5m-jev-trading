@@ -149,6 +149,8 @@ npm run dryrun -- 600 # headless dry-run loop, one line per tick (default 360s)
 npm run calibrate     # Jev log × official outcomes: Brier vs market, reliability, fee-aware sim
 npm run backtest -- --days 7   # no-Jev fair-value model vs market on past windows
 npm run backtest:maker -- --days 3   # resting-bid (maker) replay against the real taker tape
+npm run record:book -- 90            # record live L2 book + Binance + Chainlink to data/book/
+npm run paper:maker                  # replay a queue-aware paper maker on the recordings
 npm run typecheck
 npm run smoke:policy  # offline policy checks
 ```

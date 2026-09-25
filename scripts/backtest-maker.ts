@@ -8,6 +8,8 @@ import {
   f3,
   fairUp,
   klines,
+  rangeAverager,
+  twapFairUp,
   pct,
   pool,
   sigmaPerSecBefore,
@@ -39,7 +41,7 @@ import {
  *
  * Usage: tsx scripts/backtest-maker.ts [--days 3] [--deltas 0.01,0.02,0.03,0.05]
  *        [--lags 0,2,5] [--queues 0,0.1,0.25] [--inv 0,50,20] [--size 10] [--stop 20] [--ago 0]
- *        [--rebate-rate 0.2] [--fee-rate 0.07]
+ *        [--rebate-rate 0.2] [--fee-rate 0.07] [--model twap|spot]
  */
 
 loadDotEnv();
@@ -64,6 +66,10 @@ const stopBefore = arg("--stop", 20);
 const rebateRate = arg("--rebate-rate", 0.2);
 const feeRate = arg("--fee-rate", 0.07);
 const cachePath = resolve("data/maker-cache.json");
+/** twap: Polymarket's rule (60s TWAP close ≥ 60s TWAP open). spot: spot vs spot at open. */
+const fairModel = process.argv.includes("--model")
+  ? String(process.argv[process.argv.indexOf("--model") + 1])
+  : "twap";
 
 /** [unixSec, takerSide (1=BUY,0=SELL), outcome (1=UP,0=DOWN), price, size] */
 type Tape = [number, 0 | 1, 0 | 1, number, number][];
@@ -128,12 +134,13 @@ function simulate(
   lag: number,
   queue: number,
   invLimit: number,
+  avg: (a: number, b: number) => number,
 ): Result {
   const r: Result = { windows: 0, shares: 0, cost: 0, payout: 0, rebate: 0, perWindow: [], loserShares: 0, skew: 0 };
   for (const w of windows) {
-    const s0 = sec.get(w.ts);
+    const s0 = fairModel === "twap" ? avg(w.ts - 60, w.ts) : sec.get(w.ts);
     const sigma = sigmaPerSecBefore(min, w.ts);
-    if (!s0 || sigma == null) continue;
+    if (!s0 || !Number.isFinite(s0) || sigma == null) continue;
     r.windows++;
     const held = { UP: 0, DOWN: 0 };
     let cost = 0, rebate = 0;
@@ -148,7 +155,18 @@ function simulate(
       touch[side] = { p: sellPrice, t }; // visible to later trades only
       const sq = sec.get(t - lag);
       if (!sq) continue;
-      const fair = fairUp(sq, s0, sigma, w.ts + 300 - (t - lag));
+      const tq = t - lag;
+      const tau = w.ts + 300 - tq;
+      const fair =
+        fairModel === "twap"
+          ? twapFairUp({
+              st: sq,
+              k: s0,
+              sigmaPerSec: sigma,
+              tau,
+              partial: tau < 60 ? avg(w.ts + 240, tq + 1) : null,
+            })
+          : fairUp(sq, s0, sigma, tau);
       const fairSide = side === "UP" ? fair : 1 - fair;
       const cap = Math.floor((fairSide - delta) * 100 + 1e-9) / 100;
       let bid = cap;
@@ -208,7 +226,8 @@ async function main(): Promise<void> {
   const trades = windows.reduce((s, w) => s + w.tape.length, 0);
   const volume = windows.reduce((s, w) => s + w.tape.reduce((a, t) => a + t[4], 0), 0);
   console.error(`fetching Binance 1s/1m for ${days}d…`);
-  const [sec, min] = await Promise.all([klines("1s", start - 10, end + 300), klines("1m", start - 3600, end + 300)]);
+  const [sec, min] = await Promise.all([klines("1s", start - 120, end + 300), klines("1m", start - 3600, end + 300)]);
+  const avg = rangeAverager(sec, start - 120, end + 300);
   console.log(
     `${windows.length} resolved windows over ${days}d · ${trades} taker trades · ${Math.round(volume).toLocaleString()} shares\n`,
   );
@@ -222,7 +241,7 @@ async function main(): Promise<void> {
           for (const delta of deltas) combos.push([mode, inv, queue, lag, delta]);
   for (const [mode, inv, queue, lag, delta] of combos) {
     {
-      const r = simulate(windows, sec, min, mode, delta, lag, queue, inv);
+      const r = simulate(windows, sec, min, mode, delta, lag, queue, inv, avg);
       const net = r.payout - r.cost + r.rebate;
       const n = r.perWindow.length;
       const mean = net / n;
@@ -244,6 +263,7 @@ async function main(): Promise<void> {
       ]);
     }
   }
+  console.log(`Fair value: ${fairModel} model.`);
   console.log(
     `Resting bids on both outcomes, requoted with L s delay, ${quoteSize} sh/s cap, stop ${stopBefore}s before close.\n` +
       "model: bid = fair − δ.  touch: bid = min(market best bid, fair − δ).  q = share of at-price flow we get.  inv = max UP/DOWN share imbalance.",

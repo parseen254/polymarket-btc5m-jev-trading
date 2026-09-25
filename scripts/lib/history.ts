@@ -76,6 +76,59 @@ export function phi(x: number): number {
   return x >= 0 ? (1 + y) / 2 : (1 - y) / 2;
 }
 
+/** O(1) mean of a 1s price map over [a, b) (missing seconds skipped). */
+export function rangeAverager(sec: Map<number, number>, from: number, to: number) {
+  const n = to - from;
+  const sum = new Float64Array(n + 1);
+  const cnt = new Uint32Array(n + 1);
+  for (let i = 0; i < n; i++) {
+    const v = sec.get(from + i);
+    sum[i + 1] = sum[i]! + (v ?? 0);
+    cnt[i + 1] = cnt[i]! + (v ? 1 : 0);
+  }
+  return (a: number, b: number): number => {
+    const i = Math.max(0, a - from), j = Math.min(n, b - from);
+    if (j <= i) return NaN;
+    const c = cnt[j]! - cnt[i]!;
+    return c ? (sum[j]! - sum[i]!) / c : NaN;
+  };
+}
+
+/** Seconds of averaging in Polymarket's settlement (Chainlink btc-usd-twap-60s). */
+export const TWAP_SEC = 60;
+
+/**
+ * Fair value of UP under the actual rule: 60s TWAP at the close ≥ 60s TWAP at the open.
+ *
+ * k        TWAP over the minute before the window start (the price to beat)
+ * st       latest price at time t
+ * tau      seconds until the close
+ * partial  mean price so far inside the final-minute averaging window (if tau < 60)
+ *
+ * Log-price is Brownian with σ per √s. Before the final minute, the average of the last
+ * 60s has variance σ²(τ − 60 + 60/3). Inside it, the part already averaged is fixed and
+ * only the remaining τ seconds (variance σ²τ/3) can move it.
+ */
+export function twapFairUp(args: {
+  st: number;
+  k: number;
+  sigmaPerSec: number;
+  tau: number;
+  partial: number | null;
+}): number {
+  const { st, k, sigmaPerSec, tau } = args;
+  if (tau >= TWAP_SEC) {
+    return phi(Math.log(st / k) / (sigmaPerSec * Math.sqrt(tau - TWAP_SEC + TWAP_SEC / 3)));
+  }
+  const elapsed = TWAP_SEC - tau;
+  const partial = args.partial ?? st;
+  if (tau <= 0) return partial >= k ? 1 : 0;
+  // Need mean of the remaining τ seconds ≥ k' so the full 60s average reaches k.
+  const kRest = (TWAP_SEC * k - elapsed * partial) / tau;
+  if (kRest <= 0) return 1;
+  return phi(Math.log(st / kRest) / (sigmaPerSec * Math.sqrt(tau / 3)));
+}
+
 /** Digital-option fair value of UP: P(S_end ≥ S_0) given S now and τ seconds left. */
 export function fairUp(s: number, s0: number, sigmaPerSec: number, tau: number): number {
   if (tau <= 0) return s >= s0 ? 1 : 0;
