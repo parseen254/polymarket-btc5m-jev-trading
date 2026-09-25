@@ -53,10 +53,10 @@ One-shot tick (JSON to stdout):
 npm run once
 ```
 
-If Binance blocks your region (HTTP 451 on spot), add `--fixed-spot` to pin BTC spot while still calling Jev and live Polymarket:
+If Binance blocks your region (HTTP 451 on spot), point at Binance's public market-data mirror:
 
 ```bash
-npm run once -- --fixed-spot
+BINANCE_BASE_URL=https://data-api.binance.vision
 ```
 
 Offline without a Jev key:
@@ -121,6 +121,7 @@ Winners are decided by Polymarket’s rules (Chainlink BTC TWAP vs price to beat
 | `OPENROUTER_API_KEY` | — | Jev key for `openrouter` |
 | `JEV_MODEL` | `jev-1.13.0` / `typesafe/jev-1.13` | Model override for the chosen provider |
 | `POLYMARKET_SOURCE` | `auto` | `live`, `fixture`, or `auto` |
+| `BINANCE_BASE_URL` | `https://api.binance.com` | Spot API root (`https://data-api.binance.vision` if geo-blocked) |
 | `TICK_MS` | `5000` | Seconds between ticks (ms) |
 | `ACT_THRESHOLD` | `0.90` | Min confidence to enter (must be **strictly greater**) |
 | `MAX_ASK` | `0.70` | Max share price to buy |
@@ -140,6 +141,7 @@ Full list is in `.env.example`.
 ```bash
 npm run watch         # TUI loop
 npm run once          # single tick
+npm run dryrun -- 600 # headless dry-run loop, one line per tick (default 360s)
 npm run typecheck
 npm run smoke:policy  # offline policy checks
 ```

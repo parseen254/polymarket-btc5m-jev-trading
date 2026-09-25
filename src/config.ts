@@ -40,6 +40,7 @@ export type EnvBag = {
   POLYMARKET_FUNDER?: string;
   SIGNATURE_TYPE?: string;
   POLYGON_RPC_URL?: string;
+  BINANCE_BASE_URL?: string;
 };
 
 export type LoadConfigOptions = {
@@ -158,7 +159,7 @@ export function loadConfig(
       volume24h: 1.2e9,
     });
   } else {
-    spot = binanceSpotSource();
+    spot = binanceSpotSource({ baseURL: e.BINANCE_BASE_URL?.trim() });
   }
 
   const polymarket =

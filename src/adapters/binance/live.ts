@@ -8,10 +8,10 @@ import {
 
 const BINANCE = "https://api.binance.com";
 
-async function getJson(path: string): Promise<unknown> {
+async function getJsonFrom(base: string, path: string): Promise<unknown> {
   let res: Response;
   try {
-    res = await fetch(`${BINANCE}${path}`, {
+    res = await fetch(`${base}${path}`, {
       signal: AbortSignal.timeout(12_000),
     });
   } catch (e) {
@@ -25,7 +25,10 @@ async function getJson(path: string): Promise<unknown> {
   return res.json();
 }
 
-export function binanceSpotSource(): SpotSource {
+/** baseURL: e.g. https://data-api.binance.vision where api.binance.com is geo-blocked (HTTP 451). */
+export function binanceSpotSource(opts: { baseURL?: string } = {}): SpotSource {
+  const base = (opts.baseURL || BINANCE).replace(/\/+$/, "");
+  const getJson = (path: string) => getJsonFrom(base, path);
   return {
     async pullBtcPulse(): Promise<Sample<SpotPulse>> {
       const [ticker24, price, klines] = await Promise.all([
