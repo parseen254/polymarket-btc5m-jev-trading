@@ -13,6 +13,7 @@
     "dryrun": "tsx scripts/dryrun-headless.ts",
     "calibrate": "tsx scripts/calibrate.ts",
     "backtest": "tsx scripts/backtest-history.ts",
+    "backtest:maker": "tsx scripts/backtest-maker.ts",
     "smoke:policy": "tsx scripts/smoke-policy.ts",
     "typecheck": "tsc --noEmit"
   },

@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { fetchJson } from "../src/adapters/polymarket/wire.js";
 import { loadDotEnv } from "../src/loadEnv.js";
 import { takerFeePerShare } from "../src/policy.js";
+import { arg, argList, f3, klines, pct, phi, pool, sigmaPerSecBefore, table } from "./lib/history.js";
 
 /**
  * Historical check of a fair-value edge on BTC 5m Up/Down, no Jev calls.
@@ -24,12 +25,7 @@ loadDotEnv();
 
 const GAMMA = "https://gamma-api.polymarket.com";
 const CLOB = "https://clob.polymarket.com";
-const BINANCE = (process.env.BINANCE_BASE_URL || "https://api.binance.com").replace(/\/+$/, "");
 
-function arg(name: string, fallback: number): number {
-  const i = process.argv.indexOf(name);
-  return i > 0 ? Number(process.argv[i + 1]) : fallback;
-}
 const days = arg("--days", 2);
 /** Half-spread paid over the history price to lift the ask. */
 const halfSpread = arg("--spread", 0.01);
@@ -43,20 +39,6 @@ type Window = {
   finalPrice: number | null;
   upPath: { t: number; p: number }[];
 };
-
-async function pool<T, R>(items: T[], n: number, fn: (x: T) => Promise<R>): Promise<R[]> {
-  const out: R[] = new Array(items.length);
-  let i = 0;
-  await Promise.all(
-    Array.from({ length: n }, async () => {
-      while (i < items.length) {
-        const k = i++;
-        out[k] = await fn(items[k]!);
-      }
-    }),
-  );
-  return out;
-}
 
 async function loadWindow(ts: number): Promise<Window | null> {
   const ev = (await fetchJson(`${GAMMA}/events?slug=btc-updown-5m-${ts}`).catch(() => null)) as
@@ -85,42 +67,6 @@ async function loadWindow(ts: number): Promise<Window | null> {
     finalPrice: ev?.[0]?.eventMetadata?.finalPrice ?? null,
     upPath: (hist?.history ?? []).filter((h) => h.t >= ts && h.t < ts + 300),
   };
-}
-
-/** Binance klines [openTimeMs, open, ...] → map openTimeSec → open. */
-async function klines(interval: "1s" | "1m", startSec: number, endSec: number): Promise<Map<number, number>> {
-  const step = interval === "1s" ? 1 : 60;
-  const chunks: number[] = [];
-  for (let s = startSec; s < endSec; s += 1000 * step) chunks.push(s);
-  const out = new Map<number, number>();
-  const pages = await pool(chunks, 6, (s) =>
-    fetchJson(
-      `${BINANCE}/api/v3/klines?symbol=BTCUSDT&interval=${interval}&startTime=${s * 1000}&endTime=${Math.min(endSec, s + 1000 * step) * 1000 - 1}&limit=1000`,
-    ) as Promise<unknown[][]>,
-  );
-  for (const page of pages) for (const k of page) out.set(Number(k[0]) / 1000, Number(k[1]));
-  return out;
-}
-
-/** Standard normal CDF (Abramowitz–Stegun 7.1.26). */
-function phi(x: number): number {
-  const t = 1 / (1 + 0.3275911 * Math.abs(x) / Math.SQRT2);
-  const y =
-    1 -
-    ((((1.061405429 * t - 1.453152027) * t + 1.421413741) * t - 0.284496736) * t + 0.254829592) *
-      t *
-      Math.exp(-(x * x) / 2);
-  return x >= 0 ? (1 + y) / 2 : (1 - y) / 2;
-}
-
-const pct = (x: number) => `${(x * 100).toFixed(1)}%`;
-const f3 = (x: number) => (Number.isFinite(x) ? x.toFixed(3) : "-");
-function table(head: string[], rows: (string | number)[][]): void {
-  const w = head.map((h, i) => Math.max(h.length, ...rows.map((r) => String(r[i]).length)));
-  const line = (r: (string | number)[]) => r.map((c, i) => String(c).padStart(w[i]!)).join("  ");
-  console.log(line(head));
-  for (const r of rows) console.log(line(r));
-  console.log();
 }
 
 async function main(): Promise<void> {
@@ -157,14 +103,8 @@ async function main(): Promise<void> {
   for (const w of windows) {
     const s0 = sec.get(w.ts);
     if (!s0) continue;
-    const rets: number[] = [];
-    for (let t = w.ts - 3600; t < w.ts; t += 60) {
-      const a = min.get(t), b = min.get(t + 60);
-      if (a && b) rets.push(Math.log(b / a));
-    }
-    if (rets.length < 30) continue;
-    const mean = rets.reduce((s, r) => s + r, 0) / rets.length;
-    const sigmaPerSec = Math.sqrt(rets.reduce((s, r) => s + (r - mean) ** 2, 0) / (rets.length - 1) / 60);
+    const sigmaPerSec = sigmaPerSecBefore(min, w.ts);
+    if (sigmaPerSec == null) continue;
     for (const h of w.upPath) {
       const tau = w.ts + 300 - h.t;
       const st = sec.get(h.t);
@@ -216,12 +156,8 @@ async function main(): Promise<void> {
   //    `lag` feeds the model BTC from `lag` seconds before the quote. If profit
   //    disappears with a few seconds of lag, the "edge" is just reading stale
   //    history prices faster than they update — a latency race, not a durable edge.
-  const lags = String(process.argv[process.argv.indexOf("--lags") + 1] ?? "")
-    .split(",")
-    .map(Number)
-    .filter((x) => process.argv.includes("--lags") && Number.isFinite(x));
   const sims: (string | number)[][] = [];
-  for (const lag of lags.length ? lags : [0]) {
+  for (const lag of argList("--lags", [0])) {
     for (const theta of [0, 0.05, 0.1, 0.15]) {
       const seen = new Set<number>();
       let n = 0, wins = 0, pnl = 0, pnl2 = 0;
