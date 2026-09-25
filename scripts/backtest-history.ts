@@ -17,7 +17,7 @@ import { takerFeePerShare } from "../src/policy.js";
  * previous hour of 1m returns. Then: does the model forecast better than the
  * market, where is the market miscalibrated, and does trading the gap survive fees?
  *
- * Usage: tsx scripts/backtest-history.ts [--days 2] [--spread 0.01] [--fee-rate 0.07]
+ * Usage: tsx scripts/backtest-history.ts [--days 2] [--spread 0.01] [--fee-rate 0.07] [--lags 0,5,15,30]
  */
 
 loadDotEnv();
@@ -143,7 +143,16 @@ async function main(): Promise<void> {
   console.error(`fetching Binance 1s/1m for ${days}d…`);
   const [sec, min] = await Promise.all([klines("1s", start, end + 300), klines("1m", start - 3600, end + 300)]);
 
-  type Obs = { w: Window; tau: number; mkt: number; model: number; y: number };
+  type Obs = {
+    w: Window;
+    t: number;
+    tau: number;
+    mkt: number;
+    model: number;
+    y: number;
+    s0: number;
+    sigmaPerSec: number;
+  };
   const obs: Obs[] = [];
   for (const w of windows) {
     const s0 = sec.get(w.ts);
@@ -161,7 +170,7 @@ async function main(): Promise<void> {
       const st = sec.get(h.t);
       if (!st || tau < 15) continue;
       const model = phi(Math.log(st / s0) / (sigmaPerSec * Math.sqrt(tau)));
-      obs.push({ w, tau, mkt: h.p, model, y: w.winner === "UP" ? 1 : 0 });
+      obs.push({ w, t: h.t, tau, mkt: h.p, model, y: w.winner === "UP" ? 1 : 0, s0, sigmaPerSec });
     }
   }
   const upRate = windows.filter((w) => w.winner === "UP").length / windows.length;
@@ -204,31 +213,43 @@ async function main(): Promise<void> {
   table(["price", "n", "avg price", "actual", "gap"], rel);
 
   // 3) Taker sim: buy the side where model − ask − fee ≥ θ, first per window, ≥90s left.
+  //    `lag` feeds the model BTC from `lag` seconds before the quote. If profit
+  //    disappears with a few seconds of lag, the "edge" is just reading stale
+  //    history prices faster than they update — a latency race, not a durable edge.
+  const lags = String(process.argv[process.argv.indexOf("--lags") + 1] ?? "")
+    .split(",")
+    .map(Number)
+    .filter((x) => process.argv.includes("--lags") && Number.isFinite(x));
   const sims: (string | number)[][] = [];
-  for (const theta of [0, 0.03, 0.05, 0.1, 0.15]) {
-    const seen = new Set<number>();
-    let n = 0, wins = 0, pnl = 0, pnl2 = 0;
-    for (const o of obs) {
-      if (seen.has(o.w.ts) || o.tau < 90) continue;
-      for (const side of ["UP", "DOWN"] as const) {
-        const ask = (side === "UP" ? o.mkt : 1 - o.mkt) + halfSpread;
-        const p = side === "UP" ? o.model : 1 - o.model;
-        if (ask <= 0 || ask >= 1) continue;
-        const fee = takerFeePerShare(ask, feeRate);
-        if (p - ask - fee < theta) continue;
-        seen.add(o.w.ts);
-        const win = o.w.winner === side;
-        const r = (win ? 1 : 0) - ask - fee;
-        n++; wins += win ? 1 : 0; pnl += r; pnl2 += r * r;
-        break;
+  for (const lag of lags.length ? lags : [0]) {
+    for (const theta of [0, 0.05, 0.1, 0.15]) {
+      const seen = new Set<number>();
+      let n = 0, wins = 0, pnl = 0, pnl2 = 0;
+      for (const o of obs) {
+        if (seen.has(o.w.ts) || o.tau < 90) continue;
+        const st = sec.get(o.t - lag);
+        if (!st) continue;
+        const model = phi(Math.log(st / o.s0) / (o.sigmaPerSec * Math.sqrt(o.tau)));
+        for (const side of ["UP", "DOWN"] as const) {
+          const ask = (side === "UP" ? o.mkt : 1 - o.mkt) + halfSpread;
+          const p = side === "UP" ? model : 1 - model;
+          if (ask <= 0 || ask >= 1) continue;
+          const fee = takerFeePerShare(ask, feeRate);
+          if (p - ask - fee < theta) continue;
+          seen.add(o.w.ts);
+          const win = o.w.winner === side;
+          const r = (win ? 1 : 0) - ask - fee;
+          n++; wins += win ? 1 : 0; pnl += r; pnl2 += r * r;
+          break;
+        }
       }
+      const mean = n ? pnl / n : NaN;
+      const sd = n > 1 ? Math.sqrt((pnl2 - n * mean * mean) / (n - 1)) : NaN;
+      sims.push([lag, theta, n, n ? pct(wins / n) : "-", pnl.toFixed(2), f3(mean), f3(mean / (sd / Math.sqrt(n)))]);
     }
-    const mean = n ? pnl / n : NaN;
-    const sd = n > 1 ? Math.sqrt((pnl2 - n * mean * mean) / (n - 1)) : NaN;
-    sims.push([theta, n, n ? pct(wins / n) : "-", pnl.toFixed(2), f3(mean), f3(mean / (sd / Math.sqrt(n)))]);
   }
   console.log(`Taker sim: 1 share, ask = price + ${halfSpread}, fee rate ${feeRate}, ≥90s left`);
-  table(["θ", "trades", "win", "net $", "$/trade", "t-stat"], sims);
+  table(["lag s", "θ", "trades", "win", "net $", "$/trade", "t-stat"], sims);
   console.log("t-stat > 2 over hundreds of trades is the minimum bar; re-run on fresh days before trusting it.");
 }
 

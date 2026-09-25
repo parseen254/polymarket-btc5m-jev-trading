@@ -154,6 +154,12 @@ npm run smoke:policy  # offline policy checks
 
 ---
 
+## Is there an edge?
+
+Read [docs/EDGE.md](docs/EDGE.md) before going live. Short version: on 7 days of history the market is well calibrated, Jev's probabilities are near 0/1 regardless of time left, and the only profit a simple model finds disappears with 10 s of data lag.
+
+---
+
 ## Disclaimer
 
 Experimental software. Not financial advice. You can lose money. Not affiliated with Polymarket or TypeSafe beyond using their APIs/SDKs.
