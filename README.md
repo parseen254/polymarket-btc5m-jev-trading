@@ -159,7 +159,11 @@ npm run smoke:policy  # offline policy checks
 
 ## Is there an edge?
 
-Read [docs/EDGE.md](docs/EDGE.md) before going live. Short version: on 7 days of history the market is well calibrated, Jev's probabilities are near 0/1 regardless of time left, and taker profits disappear with 10 s of data lag. The only thing that survived an attempt to disprove it is quoting as a maker at the market's bid with inventory limits, and only when quotes react to BTC within about 1 s.
+Read [docs/EDGE.md](docs/EDGE.md) before going live. Short version:
+
+- Jev's probabilities are overconfident and forecast worse than the market. Don't trade on them.
+- A fair-value model of the actual settlement rule (60 s TWAP vs 60 s TWAP) beats the market's forecasts on 7 days of history. Taker entries on it look profitable with up to ~5 s of data delay, but that isn't yet confirmed against the real order book.
+- Market making (joining the bid for rebates) looked good on the trade tape but loses 4–6 ¢/share on the real book: most fills are pick-offs.
 
 ---
 
