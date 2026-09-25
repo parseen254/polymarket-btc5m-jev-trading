@@ -31,6 +31,15 @@ export function buildIdempotencyKey(args: {
 }
 
 /**
+ * Polymarket taker fee per share: rate × p × (1 − p). Crypto up/down markets use
+ * rate 0.07 (Gamma feeSchedule, exponent 1, taker-only). Makers pay nothing.
+ */
+export function takerFeePerShare(price: number, rate: number): number {
+  if (!(rate > 0) || !(price > 0) || !(price < 1)) return 0;
+  return rate * price * (1 - price);
+}
+
+/**
  * Share count for a USD budget at `price`. Floors to 2dp so size×price ≤ usd.
  */
 export function sizeSharesForUsd(usd: number, price: number): number {
@@ -115,8 +124,10 @@ export type PlanTradeOpts = {
   betUsd: number;
   /** Refuse ENTER when ask > maxAsk (default 0.70). */
   maxAsk: number;
-  /** Require P(win) ≥ ask + minEdge (default 0.10). */
+  /** Require P(win) ≥ ask + taker fee + minEdge (default 0.10). */
   minEdge: number;
+  /** Taker fee rate for the edge check (default 0.07). */
+  takerFeeRate: number;
   /** No new ENTER when seconds left < this (default 90). */
   minSecondsToEnter: number;
   /** Window seconds remaining; null unknown. */
@@ -135,7 +146,7 @@ export function heldWinProb(opinion: JudgeOpinion, side: Side): number {
 /**
  * Ride-to-resolution policy.
  *
- * Flat: ENTER once when conf > threshold, ask ≤ maxAsk, P(win) ≥ ask+minEdge,
+ * Flat: ENTER once when conf > threshold, ask ≤ maxAsk, P(win) ≥ ask+fee+minEdge,
  * and enough time left. Open: HOLD until settle — no mid-window sell/flip.
  */
 export function planTrade(
@@ -150,6 +161,7 @@ export function planTrade(
     betUsd,
     maxAsk,
     minEdge,
+    takerFeeRate,
     minSecondsToEnter,
     secondsRemaining,
     maxEntersPerWindow,
@@ -208,7 +220,8 @@ export function planTrade(
   const ask =
     market.bySide[opinion.side].bestAsk ?? market.bySide[opinion.side].mid;
   const pWin = heldWinProb(opinion, opinion.side);
-  const need = ask + minEdge;
+  const fee = takerFeePerShare(ask, takerFeeRate);
+  const need = ask + fee + minEdge;
 
   if (ask > maxAsk) {
     return {
@@ -223,7 +236,7 @@ export function planTrade(
     };
   }
 
-  // Fair EV needs P(win) above ask by minEdge. Conf alone is not edge.
+  // Fair EV needs P(win) above ask + fee by minEdge. Conf alone is not edge.
   if (!(pWin >= need)) {
     return {
       kind: "ABSTAIN",
@@ -237,7 +250,7 @@ export function planTrade(
     };
   }
 
-  const why = `ENTER ${opinion.side}: P=${pWin.toFixed(3)} vs ask ${ask.toFixed(3)} (edge ${(pWin - ask).toFixed(3)}) · conf ${opinion.confidence.toFixed(3)} · ride ≤$${betUsd}`;
+  const why = `ENTER ${opinion.side}: P=${pWin.toFixed(3)} vs ask ${ask.toFixed(3)} + fee ${fee.toFixed(3)} (edge ${(pWin - ask - fee).toFixed(3)}) · conf ${opinion.confidence.toFixed(3)} · ride ≤$${betUsd}`;
   return {
     kind: "ENTER",
     side: opinion.side,

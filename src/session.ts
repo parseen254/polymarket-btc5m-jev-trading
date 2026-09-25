@@ -1,3 +1,5 @@
+import { mkdir, appendFile } from "node:fs/promises";
+import { dirname } from "node:path";
 import { composeFacts } from "./compose.js";
 import {
   resolveWinner,
@@ -7,7 +9,7 @@ import {
   effectiveEndsAt,
 } from "./adapters/polymarket/wire.js";
 import { appendPnL, markUnrealizedUsd, readSummary, settlePnLUsd } from "./pnl/ledger.js";
-import { planTrade, planWindowEndExit } from "./policy.js";
+import { markBid, planTrade, planWindowEndExit, takerFeePerShare } from "./policy.js";
 import {
   nowIso,
   type ActorHealth,
@@ -25,6 +27,21 @@ import {
   type WindowPhase,
 } from "./domain.js";
 import { summarizeAction, TraceRing, voiceLine } from "./trace.js";
+
+/** A held position whose window ended; booked once Polymarket posts the official result. */
+type PendingSettle = {
+  slug: string;
+  side: import("./domain.js").Side;
+  entryPrice: number;
+  size: number;
+  /** Bid mark at window end; used only if the official result never arrives. */
+  markAtEnd: number;
+  endedAtMs: number;
+  lastTryMs: number;
+};
+
+const SETTLE_POLL_MS = 15_000;
+const SETTLE_GIVE_UP_MS = 30 * 60_000;
 
 type ActorSlot<T> = {
   sample: Sample<T> | null;
@@ -53,6 +70,10 @@ export class WindowSession {
   /** Last market sample for the window we are/were trading (settle after rollover). */
   private heldMarket: DomainMarket | null = null;
   /** BTC price when the current 5m window was entered (for true moveVsWindowOpenPct). */
+  /**
+   * Binance BTC at the window start. Polymarket settles on Chainlink, which sits a few
+   * dollars off Binance, so open and last must come from the same feed.
+   */
   private windowOpenBtc: number | null = null;
   private entersThisWindow = 0;
   private lastOrder: IntendedOrder | null = null;
@@ -60,6 +81,7 @@ export class WindowSession {
   private lastPnL: PnLRecord | null = null;
   private cumulativePnLUsd = 0;
   private stopLoop: (() => void) | null = null;
+  private pendingSettles: PendingSettle[] = [];
 
   private constructor(cfg: SessionConfig) {
     this.cfg = cfg;
@@ -95,7 +117,11 @@ export class WindowSession {
       at,
     });
 
-    await Promise.all([this.refreshMarket(), this.refreshSpot()]);
+    await Promise.all([
+      this.refreshMarket(),
+      this.refreshSpot(),
+      this.drainPendingSettles(at),
+    ]);
 
     if (this.phase === "awaiting_window") {
       return this.tickAwaiting(at);
@@ -213,7 +239,8 @@ export class WindowSession {
     this.activeSlug = market.eventSlug;
     this.heldMarket = market;
     this.position = { kind: "flat" };
-    this.windowOpenBtc = this.spot.sample?.value.last ?? null;
+    // Price to beat is BTC at the window's start, not whenever we first saw it.
+    this.windowOpenBtc = await this.windowStartPrice(market.eventSlug);
     this.entersThisWindow = 0;
     this.phase = "trading";
     this.trace.pushActivity({
@@ -335,6 +362,7 @@ export class WindowSession {
       betUsd: this.cfg.betUsd,
       maxAsk: this.cfg.maxAsk,
       minEdge: this.cfg.minEdge,
+      takerFeeRate: this.cfg.takerFeeRate,
       minSecondsToEnter: this.cfg.minSecondsToEnter,
       secondsRemaining: rem,
       maxEntersPerWindow: this.cfg.maxEntersPerWindow,
@@ -347,6 +375,7 @@ export class WindowSession {
       ok: true,
     });
 
+    await this.logJev(at, composed.facts, opinion, action, rem);
     await this.execute(action, market, at);
     return this.snapshot(at, composed.facts, opinion, action, rem);
   }
@@ -446,7 +475,26 @@ export class WindowSession {
 
     const openBefore = this.position;
 
-    if (openBefore.kind === "open") {
+    if (openBefore.kind === "open" && this.cfg.resolveOutcome) {
+      const settleMkt = await this.marketForSettle(openBefore.slug, feed);
+      this.pendingSettles.push({
+        slug: openBefore.slug,
+        side: openBefore.side,
+        entryPrice: openBefore.entryPrice,
+        size: openBefore.size,
+        markAtEnd: markBid(settleMkt, openBefore.side),
+        endedAtMs: Date.parse(at),
+        lastTryMs: 0,
+      });
+      this.position = { kind: "flat" };
+      action = {
+        kind: "ABSTAIN",
+        reason: {
+          code: "SETTLING",
+          detail: `${openBefore.slug} ended — booking on official result`,
+        },
+      };
+    } else if (openBefore.kind === "open") {
       const settleMkt = await this.marketForSettle(openBefore.slug, feed);
       const winner = resolveWinner(settleMkt);
 
@@ -542,14 +590,22 @@ export class WindowSession {
     size: number;
     winner: import("./domain.js").Side | null;
     reason: PnLRecord["reason"];
+    /** True when the exit was a sell order (taker fee); false for resolution or a mark. */
+    exitIsTrade?: boolean;
   }): Promise<void> {
-    const pnlUsd = settlePnLUsd({
+    const feeUsd =
+      args.size * takerFeePerShare(args.entryPrice, this.cfg.takerFeeRate) +
+      (args.exitIsTrade
+        ? args.size * takerFeePerShare(args.exitPrice, this.cfg.takerFeeRate)
+        : 0);
+    const grossPnlUsd = settlePnLUsd({
       positionSide: args.side,
       winner: args.winner,
       entryPrice: args.entryPrice,
       size: args.size,
       exitPrice: args.exitPrice,
     });
+    const pnlUsd = grossPnlUsd - feeUsd;
     const record: PnLRecord = {
       slug: args.slug,
       settledAt: args.at,
@@ -559,6 +615,8 @@ export class WindowSession {
       exitPrice: args.exitPrice,
       size: args.size,
       pnlUsd,
+      grossPnlUsd,
+      feeUsd,
       mode: this.cfg.liveTrading ? "live" : "dry-run",
       reason: args.reason,
     };
@@ -572,6 +630,127 @@ export class WindowSession {
     );
     this.lastPnL = record;
     this.cumulativePnLUsd += pnlUsd;
+  }
+
+  private static slugStartSec(slug: string): number | null {
+    const m = /-(\d+)$/.exec(slug);
+    return m ? Number(m[1]) : null;
+  }
+
+  /** Binance 1m open at the window start; falls back to the latest spot. */
+  private async windowStartPrice(slug: string): Promise<number | null> {
+    const start = WindowSession.slugStartSec(slug);
+    const latest = this.spot.sample?.value.last ?? null;
+    if (start == null || !this.cfg.spot.priceAt) return latest;
+    try {
+      return (await this.cfg.spot.priceAt(start)) ?? latest;
+    } catch {
+      return latest;
+    }
+  }
+
+  /** Book pending positions whose windows Polymarket has now resolved. */
+  private async drainPendingSettles(at: ReturnType<typeof nowIso>): Promise<void> {
+    const resolve = this.cfg.resolveOutcome;
+    if (!resolve || this.pendingSettles.length === 0) return;
+    const nowMs = Date.parse(at);
+    const still: PendingSettle[] = [];
+    for (const p of this.pendingSettles) {
+      if (nowMs - p.lastTryMs < SETTLE_POLL_MS) {
+        still.push(p);
+        continue;
+      }
+      p.lastTryMs = nowMs;
+      let outcome: { winner: import("./domain.js").Side } | null = null;
+      try {
+        outcome = await resolve(p.slug);
+      } catch (err) {
+        this.trace.pushActivity({
+          channel: "gamma",
+          op: "resolve",
+          detail: `${p.slug} ${err instanceof Error ? err.message : String(err)}`.slice(0, 80),
+          ok: false,
+        });
+      }
+      if (outcome) {
+        await this.bookRealized({
+          slug: p.slug,
+          at,
+          side: p.side,
+          entryPrice: p.entryPrice,
+          exitPrice: p.side === outcome.winner ? 1 : 0,
+          size: p.size,
+          winner: outcome.winner,
+          reason: "settle",
+        });
+        this.trace.pushActivity({
+          channel: "sys",
+          op: "settle",
+          detail: `${p.slug} official winner ${outcome.winner} (held ${p.side})`,
+          ok: true,
+        });
+      } else if (nowMs - p.endedAtMs > SETTLE_GIVE_UP_MS) {
+        await this.bookRealized({
+          slug: p.slug,
+          at,
+          side: p.side,
+          entryPrice: p.entryPrice,
+          exitPrice: p.markAtEnd,
+          size: p.size,
+          winner: null,
+          reason: "window_end",
+        });
+        this.trace.pushActivity({
+          channel: "sys",
+          op: "settle_timeout",
+          detail: `${p.slug} unresolved after 30m — marked @${p.markAtEnd}`,
+          ok: false,
+        });
+      } else {
+        still.push(p);
+      }
+    }
+    this.pendingSettles = still;
+  }
+
+  /** One JSONL row per Jev answer, joined later with official outcomes for calibration. */
+  private async logJev(
+    at: ReturnType<typeof nowIso>,
+    facts: FactsForJev,
+    opinion: JudgeOpinion,
+    action: TradeAction,
+    secondsLeft: number | null,
+  ): Promise<void> {
+    const path = this.cfg.jevLogPath;
+    if (!path) return;
+    const row = {
+      at,
+      slug: facts.market.slug,
+      secondsLeft,
+      side: opinion.side,
+      confidence: opinion.confidence,
+      pUp: opinion.probs?.UP ?? null,
+      pDown: opinion.probs?.DOWN ?? null,
+      up: { bid: facts.market.up.bid, ask: facts.market.up.ask, mid: facts.market.up.mid },
+      down: { bid: facts.market.down.bid, ask: facts.market.down.ask, mid: facts.market.down.mid },
+      btc: facts.btc.last,
+      windowOpenBtc: facts.btc.windowOpen,
+      movePct: facts.btc.moveVsWindowOpenPct,
+      position: facts.session.position.kind === "open" ? facts.session.position.side : null,
+      action: action.kind === "ABSTAIN" ? `ABSTAIN:${action.reason.code}` : action.kind,
+      mode: this.cfg.liveTrading ? "live" : "dry-run",
+    };
+    try {
+      await mkdir(dirname(path), { recursive: true });
+      await appendFile(path, `${JSON.stringify(row)}\n`, "utf8");
+    } catch (err) {
+      this.trace.pushActivity({
+        channel: "sys",
+        op: "jev_log",
+        detail: (err instanceof Error ? err.message : String(err)).slice(0, 80),
+        ok: false,
+      });
+    }
   }
 
   private async execute(
@@ -609,6 +788,7 @@ export class WindowSession {
           exitPrice: exitOrder.price,
           size: openBefore.size,
           winner: null,
+          exitIsTrade: true,
           reason:
             action.kind === "SWITCH"
               ? "switch"
@@ -633,6 +813,7 @@ export class WindowSession {
         exitPrice: result.orders[0]!.price,
         size: openBefore.size,
         winner: null,
+        exitIsTrade: true,
         reason: "switch",
       });
     }

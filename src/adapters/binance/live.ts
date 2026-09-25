@@ -30,6 +30,15 @@ export function binanceSpotSource(opts: { baseURL?: string } = {}): SpotSource {
   const base = (opts.baseURL || BINANCE).replace(/\/+$/, "");
   const getJson = (path: string) => getJsonFrom(base, path);
   return {
+    async priceAt(unixSec: number): Promise<number | null> {
+      const rows = (await getJson(
+        `/api/v3/klines?symbol=BTCUSDT&interval=1m&startTime=${unixSec * 1000}&limit=1`,
+      )) as unknown[][];
+      const first = rows[0];
+      if (!first || Number(first[0]) !== unixSec * 1000) return null;
+      const open = Number(first[1]);
+      return Number.isFinite(open) && open > 0 ? open : null;
+    },
     async pullBtcPulse(): Promise<Sample<SpotPulse>> {
       const [ticker24, price, klines] = await Promise.all([
         getJson("/api/v3/ticker/24hr?symbol=BTCUSDT") as Promise<Record<string, string>>,

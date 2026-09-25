@@ -10,6 +10,7 @@ import { applyDry } from "./broker/dry.js";
 import { LiveBroker } from "./broker/live.js";
 import { logPen } from "./dryrun/log-pen.js";
 import { defaultPnLPath } from "./pnl/ledger.js";
+import { fetchOfficialOutcome } from "./adapters/polymarket/resolution.js";
 import type {
   Judge,
   MarketSource,
@@ -41,6 +42,8 @@ export type EnvBag = {
   SIGNATURE_TYPE?: string;
   POLYGON_RPC_URL?: string;
   BINANCE_BASE_URL?: string;
+  TAKER_FEE_RATE?: string;
+  JEV_LOG_PATH?: string;
 };
 
 export type LoadConfigOptions = {
@@ -102,6 +105,7 @@ export function loadConfig(
   const betUsd = num(e.BET_USD, 5);
   const maxAsk = num(e.MAX_ASK, 0.7);
   const minEdge = num(e.MIN_EDGE, 0.1);
+  const takerFeeRate = Math.max(0, num(e.TAKER_FEE_RATE, 0.07));
   const minSecondsToEnter = Math.max(0, Math.floor(num(e.MIN_SECONDS_TO_ENTER, 90)));
   const maxEntersPerWindow = Math.max(
     1,
@@ -117,6 +121,9 @@ export function loadConfig(
     );
   }
   const pnlPath = resolve(e.PNL_PATH ?? defaultPnLPath());
+  const jevLogRaw = e.JEV_LOG_PATH?.trim();
+  const jevLogPath =
+    jevLogRaw === "off" ? null : resolve(jevLogRaw || "data/jev-log.jsonl");
 
   let judge: Judge;
   let spot: SpotSource;
@@ -195,6 +202,7 @@ export function loadConfig(
     betUsd: opts.overrides?.betUsd ?? betUsd,
     maxAsk: opts.overrides?.maxAsk ?? maxAsk,
     minEdge: opts.overrides?.minEdge ?? minEdge,
+    takerFeeRate: opts.overrides?.takerFeeRate ?? takerFeeRate,
     minSecondsToEnter:
       opts.overrides?.minSecondsToEnter ?? minSecondsToEnter,
     maxEntersPerWindow:
@@ -203,6 +211,17 @@ export function loadConfig(
     staleAfterMs: opts.overrides?.staleAfterMs ?? staleAfterMs,
     windowLengthSec: opts.overrides?.windowLengthSec ?? 300,
     pnlPath: opts.overrides?.pnlPath ?? pnlPath,
+    jevLogPath:
+      opts.overrides?.jevLogPath !== undefined
+        ? opts.overrides.jevLogPath
+        : jevLogPath,
+    // Fixture slugs are fake; they can never resolve on Gamma.
+    resolveOutcome:
+      opts.overrides?.resolveOutcome !== undefined
+        ? opts.overrides.resolveOutcome
+        : sourceName === "fixture"
+          ? null
+          : fetchOfficialOutcome,
     liveTrading: opts.overrides?.liveTrading ?? liveTrading,
     executor,
   };

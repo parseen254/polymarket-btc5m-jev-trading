@@ -10,7 +10,7 @@ import {
   type DomainMarket,
   type Position,
 } from "../src/domain.js";
-import { planTrade } from "../src/policy.js";
+import { planTrade, takerFeePerShare } from "../src/policy.js";
 
 const at = asIsoTime("2026-01-01T00:00:00.000Z");
 const market: DomainMarket = {
@@ -52,6 +52,7 @@ const opts = {
   betUsd: 5,
   maxAsk: 0.7,
   minEdge: 0.1,
+  takerFeeRate: 0.07,
   minSecondsToEnter: 90,
   secondsRemaining: 200,
   maxEntersPerWindow: 1,
@@ -150,6 +151,22 @@ const openUp: Position = {
     if (a.reason.code === "NO_EDGE") assert.ok(a.reason.need > a.reason.ask);
   }
   console.log("ok P=0.60 vs ask 0.56 need 0.66 → NO_EDGE");
+}
+
+{
+  // Polymarket docs: 100 shares at $0.50 → $1.75 taker fee.
+  assert.ok(Math.abs(100 * takerFeePerShare(0.5, 0.07) - 1.75) < 1e-9);
+  // P=0.67 clears ask+minEdge (0.66) but not ask+fee+minEdge (≈0.677).
+  const a = planTrade(
+    flat,
+    { side: "UP", confidence: confHi, probs: { UP: 0.67, DOWN: 0.33 } },
+    market,
+    at,
+    opts,
+  );
+  assert.equal(a.kind, "ABSTAIN");
+  if (a.kind === "ABSTAIN") assert.equal(a.reason.code, "NO_EDGE");
+  console.log("ok taker fee counted in edge: P=0.67 vs ask 0.56 → NO_EDGE");
 }
 
 {

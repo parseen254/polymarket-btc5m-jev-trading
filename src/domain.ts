@@ -152,7 +152,11 @@ export type PnLRecord = {
   entryPrice: number | null;
   exitPrice: number | null;
   size: number;
+  /** Net of taker fees. */
   pnlUsd: number;
+  /** Before fees (absent on ledgers written before fees were modeled). */
+  grossPnlUsd?: number;
+  feeUsd?: number;
   mode: "dry-run" | "live";
   reason:
     | "exit"
@@ -226,6 +230,8 @@ export interface MarketSource {
 
 export interface SpotSource {
   pullBtcPulse(): Promise<Sample<SpotPulse>>;
+  /** Optional: BTC price at a past instant (1m candle open), for the window's open reference. */
+  priceAt?(unixSec: number): Promise<number | null>;
 }
 
 export interface Judge {
@@ -258,8 +264,10 @@ export type SessionConfig = {
   betUsd: number;
   /** Refuse ENTER if ask above this (default 0.70). */
   maxAsk: number;
-  /** Require P(win) ≥ ask + minEdge (default 0.10). */
+  /** Require P(win) ≥ ask + taker fee + minEdge (default 0.10). */
   minEdge: number;
+  /** Polymarket taker fee rate: fee/share = rate × p × (1 − p) (default 0.07). */
+  takerFeeRate: number;
   /** Abstain from new ENTER when fewer seconds remain (default 90). */
   minSecondsToEnter: number;
   /** Max ENTER actions per 5m window (default 1 — ride to end). */
@@ -268,6 +276,15 @@ export type SessionConfig = {
   staleAfterMs: number;
   windowLengthSec: number;
   pnlPath: string;
+  /** Append every Jev answer + book snapshot here for calibration (null = off). */
+  jevLogPath: string | null;
+  /**
+   * Official result lookup. When set, positions are booked only once Polymarket
+   * resolves the window; when null (fixture), settle from the held book.
+   */
+  resolveOutcome:
+    | ((slug: string) => Promise<{ winner: Side } | null>)
+    | null;
   liveTrading: boolean;
   executor: OrderExecutor;
 };

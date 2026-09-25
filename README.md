@@ -108,7 +108,9 @@ Every ~5s (`TICK_MS`):
 | Confidence &gt; 0.90 and edge ok | Buy once (≤ `BET_USD`) |
 | Already in a position | Hold until the 5m window ends |
 
-Winners are decided by Polymarket’s rules (Chainlink BTC TWAP vs price to beat), not by share odds.
+Winners are decided by Polymarket’s rules (Chainlink BTC vs price to beat), not by share odds.
+
+Dry-run PnL is net of the taker fee and is booked only once Polymarket posts the official result for the window (usually ~1 minute after it closes). Every Jev answer is logged to `data/jev-log.jsonl`; run `npm run calibrate` to see whether Jev forecasts better than the market price before trusting it.
 
 ---
 
@@ -125,7 +127,9 @@ Winners are decided by Polymarket’s rules (Chainlink BTC TWAP vs price to beat
 | `TICK_MS` | `5000` | Seconds between ticks (ms) |
 | `ACT_THRESHOLD` | `0.90` | Min confidence to enter (must be **strictly greater**) |
 | `MAX_ASK` | `0.70` | Max share price to buy |
-| `MIN_EDGE` | `0.10` | Need P(win) ≥ ask + this |
+| `MIN_EDGE` | `0.10` | Need P(win) ≥ ask + taker fee + this |
+| `TAKER_FEE_RATE` | `0.07` | Polymarket crypto taker fee: `rate × p × (1 − p)` per share |
+| `JEV_LOG_PATH` | `data/jev-log.jsonl` | Per-call Jev log for calibration (`off` to disable) |
 | `BET_USD` | `5` | Max USD per entry |
 | `LIVE_TRADING` | off | Set `1` for real CLOB orders |
 | `WALLET_PVK` | — | Signer key (live only) |
@@ -142,6 +146,8 @@ Full list is in `.env.example`.
 npm run watch         # TUI loop
 npm run once          # single tick
 npm run dryrun -- 600 # headless dry-run loop, one line per tick (default 360s)
+npm run calibrate     # Jev log × official outcomes: Brier vs market, reliability, fee-aware sim
+npm run backtest -- --days 7   # no-Jev fair-value model vs market on past windows
 npm run typecheck
 npm run smoke:policy  # offline policy checks
 ```
