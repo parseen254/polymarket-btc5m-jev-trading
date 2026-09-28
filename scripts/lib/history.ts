@@ -48,23 +48,68 @@ export async function fetchJsonRetry(url: string, attempts = 4): Promise<unknown
   }
 }
 
+async function klinePages(interval: "1s" | "1m", startSec: number, endSec: number): Promise<unknown[][][]> {
+  const step = interval === "1s" ? 1 : 60;
+  const chunks: number[] = [];
+  for (let s = startSec; s < endSec; s += 1000 * step) chunks.push(s);
+  return pool(chunks, 6, (s) =>
+    fetchJsonRetry(
+      `${binanceBase()}/api/v3/klines?symbol=BTCUSDT&interval=${interval}&startTime=${s * 1000}&endTime=${Math.min(endSec, s + 1000 * step) * 1000 - 1}&limit=1000`,
+    ) as Promise<unknown[][]>,
+  );
+}
+
 /** Binance BTCUSDT klines → map openTimeSec → open. */
 export async function klines(
   interval: "1s" | "1m",
   startSec: number,
   endSec: number,
 ): Promise<Map<number, number>> {
-  const step = interval === "1s" ? 1 : 60;
-  const chunks: number[] = [];
-  for (let s = startSec; s < endSec; s += 1000 * step) chunks.push(s);
   const out = new Map<number, number>();
-  const pages = await pool(chunks, 6, (s) =>
-    fetchJsonRetry(
-      `${binanceBase()}/api/v3/klines?symbol=BTCUSDT&interval=${interval}&startTime=${s * 1000}&endTime=${Math.min(endSec, s + 1000 * step) * 1000 - 1}&limit=1000`,
-    ) as Promise<unknown[][]>,
-  );
-  for (const page of pages) for (const k of page) out.set(Number(k[0]) / 1000, Number(k[1]));
+  for (const page of await klinePages(interval, startSec, endSec)) {
+    for (const k of page) out.set(Number(k[0]) / 1000, Number(k[1]));
+  }
   return out;
+}
+
+/**
+ * Binance BTCUSDT 1s candles as arrays indexed by (unixSec − from): open price, base
+ * volume and taker-buy base volume (0 where Binance has no candle — no trades that second).
+ */
+export async function seconds(from: number, to: number) {
+  const n = to - from;
+  const open = new Float64Array(n);
+  const vol = new Float64Array(n);
+  const buy = new Float64Array(n);
+  for (const page of await klinePages("1s", from, to)) {
+    for (const k of page) {
+      const i = Number(k[0]) / 1000 - from;
+      if (i < 0 || i >= n) continue;
+      open[i] = Number(k[1]);
+      vol[i] = Number(k[5]);
+      buy[i] = Number(k[9]);
+    }
+  }
+  // Carry the last price through seconds with no trades.
+  for (let i = 1; i < n; i++) if (!open[i]) open[i] = open[i - 1]!;
+  const prefix = new Float64Array(n + 1);
+  for (let i = 0; i < n; i++) prefix[i + 1] = prefix[i]! + open[i]!;
+  /** Mean price over [a, b). */
+  const avg = (a: number, b: number) => {
+    const i = Math.max(0, a - from), j = Math.min(n, b - from);
+    return j > i && open[i] ? (prefix[j]! - prefix[i]!) / (j - i) : NaN;
+  };
+  const at = (t: number) => {
+    const i = t - from;
+    return i >= 0 && i < n && open[i] ? open[i]! : null;
+  };
+  /** Taker-buy share of volume over [a, b), mapped to −1 (all selling) … +1 (all buying). */
+  const flow = (a: number, b: number) => {
+    let v = 0, bb = 0;
+    for (let t = Math.max(a, from); t < Math.min(b, to); t++) { v += vol[t - from]!; bb += buy[t - from]!; }
+    return v > 0 ? (2 * bb) / v - 1 : 0;
+  };
+  return { at, avg, flow };
 }
 
 /** O(1) mean of a 1s price map over [a, b) (missing seconds skipped). */

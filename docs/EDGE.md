@@ -43,6 +43,13 @@ Buy when model − (price + 1¢) − fee ≥ θ, with ≥ 90 s left:
 
 **Caveat:** the history prices are about one sample per minute, not a tradable ask. On the recorded real book (15 windows, one trade per window) the result is noise (t between −1 and +0.8). **Not yet confirmed.** This is the most promising lead, and it fits the current bot's 5 s loop.
 
+### Out-of-sample, Jev combos and BTC signals (Sep 25–28, 848 windows)
+
+- **TWAP alone still makes money on data it never saw:** θ 0.10 gives +9.4 ¢/trade, t 4.2 with a 2 s data delay; θ 0.15 gives +14 ¢/trade, t 4.5.
+- **Jev + TWAP beats both alone,** but Jev's favorite side equals the side BTC is on vs the window open in 98.5 % of cases. "TWAP + side BTC is on" matches it with no LLM (θ 0.10: 248 trades, 65 % win, +14.8 ¢, t 5.3). In the bot that's `JUDGE=twap TWAP_FOLLOW_MOVE=1`.
+- **Extra BTC signals don't reliably add anything** (`npm run backtest:signals`, in-sample Sep 18–25 vs out-of-sample Sep 25–28). 30 s momentum agreeing adds about 1 ¢/trade in both halves but drops about 15 % of trades, which is within noise (per-trade SE ≈ 2 ¢, 30 combinations tested). Order flow, 15-min trend and volatility regime are inconsistent between the halves.
+- **All of this uses about one market price sample a minute,** not the real ask. The order-book replay is the check that matters.
+
 ## Market making (quote at the bid, earn rebates)
 
 The thesis: join the best bid on both outcomes, cap it at fair − δ, stop bidding a side that leads the other by 20 shares, earn ~0.3 ¢/share in rebates, and pay no fee.
