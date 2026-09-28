@@ -50,6 +50,13 @@ Buy when model − (price + 1¢) − fee ≥ θ, with ≥ 90 s left:
 - **Extra BTC signals don't reliably add anything** (`npm run backtest:signals`, in-sample Sep 18–25 vs out-of-sample Sep 25–28). 30 s momentum agreeing adds about 1 ¢/trade in both halves but drops about 15 % of trades, which is within noise (per-trade SE ≈ 2 ¢, 30 combinations tested). Order flow, 15-min trend and volatility regime are inconsistent between the halves.
 - **All of this uses about one market price sample a minute,** not the real ask. The order-book replay is the check that matters.
 
+### Fitted combination and the real-ask check (Sep 28)
+
+- **A logistic model fitted on Sep 18–25** over TWAP, the market price, BTC side, 30 s momentum and 60 s Binance flow puts its weight on TWAP (0.60) and the market (0.38), a little on BTC side (0.11), and ≈ 0 on momentum and flow. Out-of-sample at θ 0.10 it made +16.7 ¢/trade, t 4.9 on 157 trades, the same as the simple TWAP + BTC side rule (+14.7 ¢, t 5.3, 247 trades). There is no "much better" combination in this data.
+- **On the real order book** (4 h recorded, 49 windows, buying at the real best ask with fees), TWAP + BTC side at θ ≥ 0.10 was positive in 11 of 12 delay/threshold settings: +3 to +20 ¢/share, best t 2.5 at θ 0.15 with 5 s delay. At θ 0.05 it's about flat. This is the right direction, but 49 windows can't prove it.
+- **Live dry run** (same day, 4 h): too few trades to judge (TWAP + side: 7 trades, −7 ¢/share; TWAP: 27 trades, +3.7 ¢/share; both |t| ≈ 0.5).
+- **Setting if you continue:** `JUDGE=twap TWAP_FOLLOW_MOVE=1 MIN_EDGE=0.15`. Judge it only after ≥ 300 settled dry-run trades.
+
 ## Market making (quote at the bid, earn rebates)
 
 The thesis: join the best bid on both outcomes, cap it at fair − δ, stop bidding a side that leads the other by 20 shares, earn ~0.3 ¢/share in rebates, and pay no fee.

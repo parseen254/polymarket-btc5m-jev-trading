@@ -132,7 +132,115 @@ async function main(): Promise<void> {
   }
   console.log(`Taker sim: 1 share at price + ${halfSpread}, fee rate ${feeRate}, first qualifying point per window, ≥90 s left`);
   table(["θ", "rule", "IS n", "IS win", "IS $/tr", "IS t", "OOS n", "OOS win", "OOS $/tr", "OOS t"], rows);
-  console.log("'jev' only has answers for the out-of-sample period (from backtest:combo).");
+  console.log("'jev' only has answers for the out-of-sample period (from backtest:combo).\n");
+
+  // ── Fitted combination ────────────────────────────────────────────────────────
+  // One logistic model of P(UP) on: TWAP fair value, the market's own price, the side
+  // BTC is on (Jev's pick 98.5 % of the time), 30 s momentum (in σ units) and 60 s
+  // Binance taker flow. Fitted on the in-sample period only; the out-of-sample
+  // columns are the real test. Trade the side with the larger edge when
+  // P_model − ask − fee ≥ θ.
+  const logit = (p: number) => { const q = Math.min(0.99, Math.max(0.01, p)); return Math.log(q / (1 - q)); };
+  const feats = (p: Pt) => [
+    1,
+    logit(p.pTwap),
+    logit(p.mkt),
+    p.move >= 0 ? 1 : -1,
+    p.mom30 / (p.sigma * Math.sqrt(30)),
+    p.flow60,
+  ];
+  const names = ["bias", "twap", "market", "btc side", "mom30", "flow60"];
+  const w = fitLogistic(inS.map(feats), inS.map((p) => (p.w.winner === "UP" ? 1 : 0)), 1);
+  const pModel = (p: Pt) => 1 / (1 + Math.exp(-feats(p).reduce((s, x, i) => s + x * w[i]!, 0)));
+  console.log("Fitted weights (in-sample): " + names.map((n, i) => `${n} ${w[i]!.toFixed(3)}`).join(" · "));
+
+  const brierOf = (xs: Pt[], f: (p: Pt) => number) =>
+    xs.reduce((s, p) => s + (f(p) - (p.w.winner === "UP" ? 1 : 0)) ** 2, 0) / xs.length;
+  console.log("Brier at entry points (lower = better)");
+  table(
+    ["period", "market", "twap", "fitted"],
+    [
+      ["in-sample", f3(brierOf(inS, (p) => p.mkt)), f3(brierOf(inS, (p) => p.pTwap)), f3(brierOf(inS, pModel))],
+      ["out-of-sample", f3(brierOf(outS, (p) => p.mkt)), f3(brierOf(outS, (p) => p.pTwap)), f3(brierOf(outS, pModel))],
+    ],
+  );
+
+  const runModel = (subset: Pt[], theta: number) => {
+    const seen = new Set<number>();
+    let n = 0, wins = 0, pnl = 0, pnl2 = 0;
+    for (const p of subset) {
+      if (seen.has(p.w.ts)) continue;
+      const pu = pModel(p);
+      let best: { side: Side; ask: number; fee: number; edge: number } | null = null;
+      for (const side of ["UP", "DOWN"] as const) {
+        const ask = (side === "UP" ? p.mkt : 1 - p.mkt) + halfSpread;
+        if (ask <= 0 || ask >= 1) continue;
+        const fee = takerFeePerShare(ask, feeRate);
+        const edge = (side === "UP" ? pu : 1 - pu) - ask - fee;
+        if (!best || edge > best.edge) best = { side, ask, fee, edge };
+      }
+      if (!best || best.edge < theta) continue;
+      seen.add(p.w.ts);
+      const win = p.w.winner === best.side;
+      const r = (win ? 1 : 0) - best.ask - best.fee;
+      n++; wins += win ? 1 : 0; pnl += r; pnl2 += r * r;
+    }
+    const mean = n ? pnl / n : NaN;
+    const sd = n > 1 ? Math.sqrt((pnl2 - n * mean * mean) / (n - 1)) : NaN;
+    return { n, win: n ? wins / n : NaN, mean, total: pnl, t: mean / (sd / Math.sqrt(n)) };
+  };
+  const mRows: (string | number)[][] = [];
+  for (const theta of [0, 0.02, 0.05, 0.1]) {
+    const a = runModel(inS, theta), b = runModel(outS, theta);
+    mRows.push([
+      theta,
+      a.n, a.n ? pct(a.win) : "-", a.n ? f3(a.mean) : "-", a.n > 1 ? f3(a.t) : "-",
+      b.n, b.n ? pct(b.win) : "-", b.n ? f3(b.mean) : "-", b.total.toFixed(2), b.n > 1 ? f3(b.t) : "-",
+    ]);
+  }
+  console.log("Fitted combo taker sim (in-sample is fitted, so optimistic; out-of-sample is the test)");
+  table(["θ", "IS n", "IS win", "IS $/tr", "IS t", "OOS n", "OOS win", "OOS $/tr", "OOS $", "OOS t"], mRows);
+}
+
+/** L2-regularised logistic regression by Newton's method (small feature count). */
+function fitLogistic(X: number[][], y: number[], lambda: number): number[] {
+  const d = X[0]!.length;
+  let w = new Array<number>(d).fill(0);
+  for (let iter = 0; iter < 30; iter++) {
+    const g = new Array<number>(d).fill(0);
+    const H = Array.from({ length: d }, () => new Array<number>(d).fill(0));
+    for (let i = 0; i < X.length; i++) {
+      const x = X[i]!;
+      const p = 1 / (1 + Math.exp(-x.reduce((s, v, j) => s + v * w[j]!, 0)));
+      const r = y[i]! - p, wt = p * (1 - p);
+      for (let a = 0; a < d; a++) {
+        g[a]! += x[a]! * r;
+        for (let b = 0; b < d; b++) H[a]![b]! += wt * x[a]! * x[b]!;
+      }
+    }
+    for (let a = 1; a < d; a++) { g[a]! -= lambda * w[a]!; H[a]![a]! += lambda; }
+    const step = solve(H, g);
+    w = w.map((v, j) => v + step[j]!);
+    if (step.every((s) => Math.abs(s) < 1e-8)) break;
+  }
+  return w;
+}
+
+/** Solve A x = b (Gaussian elimination with partial pivoting). */
+function solve(A: number[][], b: number[]): number[] {
+  const n = b.length;
+  const M = A.map((row, i) => [...row, b[i]!]);
+  for (let c = 0; c < n; c++) {
+    let piv = c;
+    for (let r = c + 1; r < n; r++) if (Math.abs(M[r]![c]!) > Math.abs(M[piv]![c]!)) piv = r;
+    [M[c], M[piv]] = [M[piv]!, M[c]!];
+    for (let r = 0; r < n; r++) {
+      if (r === c) continue;
+      const f = M[r]![c]! / M[c]![c]!;
+      for (let k = c; k <= n; k++) M[r]![k]! -= f * M[c]![k]!;
+    }
+  }
+  return M.map((row, i) => row[n]! / row[i]!);
 }
 
 main().catch((err) => {

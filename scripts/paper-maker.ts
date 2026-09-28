@@ -68,7 +68,12 @@ const files = () => {
 async function* lines(): AsyncGenerator<string> {
   for (const f of files()) {
     const rl = createInterface({ input: createReadStream(f).pipe(createGunzip()), crlfDelay: Infinity });
-    for await (const line of rl) if (line) yield line;
+    try {
+      for await (const line of rl) if (line) yield line;
+    } catch (err) {
+      // A recorder stopped mid-write leaves a truncated gzip; keep what was flushed.
+      console.error(`warning: ${f} ends early (${err instanceof Error ? err.message : err}); using data up to that point`);
+    }
   }
 }
 
@@ -215,6 +220,8 @@ class TakerSim {
     readonly sigma: (ts: number) => number | null,
     readonly infoLag: number,
     readonly theta: number,
+    /** Only buy the side BTC is on vs the window start (the Jev/sign rule). */
+    readonly followMove = false,
   ) {}
   decide(t: number, active: Win[]) {
     for (const w of active) {
@@ -223,7 +230,10 @@ class TakerSim {
       if (end - t < 90_000) continue;
       const fair = fairAt(this.m, w, t, this.infoLag, this.sigma(w.ts));
       if (fair == null) continue;
+      const open = this.m.midAt(w.ts * 1000), now = this.m.midAt(t - this.infoLag);
+      const onSide: Side | null = open != null && now != null ? (now >= open ? "UP" : "DOWN") : null;
       for (const [asset, side] of [[w.up, "UP"], [w.down, "DOWN"]] as const) {
+        if (this.followMove && side !== onSide) continue;
         const ask = this.m.best(asset, "ask");
         if (!ask || ask.p <= 0 || ask.p >= 1) continue;
         const fee = takerFeePerShare(ask.p, feeRate);
@@ -305,7 +315,9 @@ async function main(): Promise<void> {
   for (const orderLag of orderLags) for (const infoLag of infoLags) for (const d of deltas)
     makers.push(new MakerSim(m, assets, sigma, infoLag, orderLag, d));
   const takers: TakerSim[] = [];
-  for (const infoLag of infoLags) for (const th of thetas) takers.push(new TakerSim(m, sigma, infoLag, th));
+  for (const follow of [false, true])
+    for (const infoLag of infoLags) for (const th of thetas) takers.push(new TakerSim(m, sigma, infoLag, th, follow));
+  if (process.argv.includes("--takers-only")) makers.length = 0;
 
   // Pass 2: replay.
   let next = first;
@@ -358,7 +370,7 @@ async function main(): Promise<void> {
   const tRows = takers.map((s) => {
     const r = summarize(s.results, outcomes, windows);
     return [
-      s.infoLag, s.theta, r.traded, r.shares ? f3(r.cost / r.shares) : "-", r.shares ? pct(r.payout / r.shares) : "-",
+      s.followMove ? "twap+side" : "twap", s.infoLag, s.theta, r.traded, r.shares ? f3(r.cost / r.shares) : "-", r.shares ? pct(r.payout / r.shares) : "-",
       r.shares ? f3((r.payout - r.cost + r.extra) / r.shares) : "-", r.net.toFixed(2), f3(r.t),
     ];
   });
@@ -385,7 +397,7 @@ async function main(): Promise<void> {
   table(["order ms", "info ms", "δ", "picked off sh", "markout", "queue sh", "markout"], bRows);
 
   console.log(`TAKER at the real best ask, ≤${quoteSize} sh, once per window, ≥90 s left, fee included.`);
-  table(["info ms", "θ", "trades", "avg ask", "won", "net/sh", "net $", "t"], tRows);
+  table(["rule", "info ms", "θ", "trades", "avg ask", "won", "net/sh", "net $", "t"], tRows);
   console.log(`${windows.length} windows is a small sample: treat t-stats as a sanity check against the tape backtests, not proof.`);
 }
 
