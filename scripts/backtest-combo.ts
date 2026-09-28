@@ -1,7 +1,6 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { typeSafeJudge } from "../src/adapters/jev/typesafe.js";
-import { fetchJson } from "../src/adapters/polymarket/wire.js";
 import type { FactsForJev, Judge } from "../src/domain.js";
 import { loadDotEnv } from "../src/loadEnv.js";
 import { takerFeePerShare } from "../src/policy.js";
@@ -10,6 +9,7 @@ import {
   argList,
   binanceBase,
   f3,
+  fetchJsonRetry,
   klines,
   pct,
   pool,
@@ -81,7 +81,7 @@ async function main(): Promise<void> {
   // 1h candles for the 24h stats the bot sends Jev.
   const hours: unknown[][] = [];
   for (let s = start - 90_000; s < end; s += 1000 * 3600) {
-    hours.push(...((await fetchJson(
+    hours.push(...((await fetchJsonRetry(
       `${binanceBase()}/api/v3/klines?symbol=BTCUSDT&interval=1h&startTime=${s * 1000}&endTime=${Math.min(end, s + 1000 * 3600) * 1000 - 1}&limit=1000`,
     )) as unknown[][]));
   }

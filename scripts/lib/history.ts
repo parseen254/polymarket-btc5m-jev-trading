@@ -36,6 +36,18 @@ export function binanceBase(): string {
   return (process.env.BINANCE_BASE_URL || "https://api.binance.com").replace(/\/+$/, "");
 }
 
+/** fetchJson with retries; long backtests make hundreds of requests and one flake shouldn't abort them. */
+export async function fetchJsonRetry(url: string, attempts = 4): Promise<unknown> {
+  for (let i = 1; ; i++) {
+    try {
+      return await fetchJson(url);
+    } catch (err) {
+      if (i >= attempts) throw err;
+      await new Promise((r) => setTimeout(r, 1000 * 2 ** (i - 1)));
+    }
+  }
+}
+
 /** Binance BTCUSDT klines → map openTimeSec → open. */
 export async function klines(
   interval: "1s" | "1m",
@@ -47,7 +59,7 @@ export async function klines(
   for (let s = startSec; s < endSec; s += 1000 * step) chunks.push(s);
   const out = new Map<number, number>();
   const pages = await pool(chunks, 6, (s) =>
-    fetchJson(
+    fetchJsonRetry(
       `${binanceBase()}/api/v3/klines?symbol=BTCUSDT&interval=${interval}&startTime=${s * 1000}&endTime=${Math.min(endSec, s + 1000 * step) * 1000 - 1}&limit=1000`,
     ) as Promise<unknown[][]>,
   );
