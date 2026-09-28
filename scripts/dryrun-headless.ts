@@ -12,8 +12,8 @@ async function main(): Promise<void> {
   while (Date.now() < until) {
     const s = await session.tick();
     const op = s.opinion
-      ? `jev=${s.opinion.side}@${s.opinion.confidence.toFixed(2)} P(UP)=${s.opinion.probs?.UP.toFixed(2) ?? "?"}`
-      : "jev=-";
+      ? `judge=${s.opinion.side}@${s.opinion.confidence.toFixed(2)} P(UP)=${s.opinion.probs?.UP.toFixed(2) ?? "?"}`
+      : "judge=-";
     const btc = s.btc ? `btc=${s.btc.last} (${s.btc.source})` : "btc=-";
     const last = s.decisionLog.at(-1);
     console.log(

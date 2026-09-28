@@ -6,6 +6,7 @@ import { binanceSpotSource } from "./adapters/binance/live.js";
 import { fixedSpotSource } from "./adapters/binance/fixed.js";
 import { typeSafeJudge, type JevProvider } from "./adapters/jev/typesafe.js";
 import { stubJudge } from "./adapters/jev/stub.js";
+import { twapJudge } from "./adapters/twap/judge.js";
 import { applyDry } from "./broker/dry.js";
 import { LiveBroker } from "./broker/live.js";
 import { logPen } from "./dryrun/log-pen.js";
@@ -20,6 +21,7 @@ import type {
 } from "./domain.js";
 
 export type EnvBag = {
+  JUDGE?: string;
   TYPESAFE_API_KEY?: string;
   OPENROUTER_API_KEY?: string;
   JEV_PROVIDER?: string;
@@ -101,9 +103,15 @@ export function loadConfig(
   const fixturePath = resolve(
     e.FIXTURE_PATH ?? "fixtures/btc-updown-active.json",
   );
-  const threshold = num(e.ACT_THRESHOLD, 0.9);
+  const judgeName = (e.JUDGE ?? "jev").trim().toLowerCase();
+  if (judgeName !== "jev" && judgeName !== "twap") {
+    throw new Error(`JUDGE must be jev or twap, got ${judgeName}`);
+  }
+  // The TWAP judge's probabilities are the edge; the backtests used no confidence
+  // gate or ask cap, so those default off for it.
+  const threshold = num(e.ACT_THRESHOLD, judgeName === "twap" ? 0 : 0.9);
   const betUsd = num(e.BET_USD, 5);
-  const maxAsk = num(e.MAX_ASK, 0.7);
+  const maxAsk = num(e.MAX_ASK, judgeName === "twap" ? 0.99 : 0.7);
   const minEdge = num(e.MIN_EDGE, 0.1);
   const takerFeeRate = Math.max(0, num(e.TAKER_FEE_RATE, 0.07));
   const minSecondsToEnter = Math.max(0, Math.floor(num(e.MIN_SECONDS_TO_ENTER, 90)));
@@ -140,6 +148,8 @@ export function loadConfig(
         side: opts.stubSide ?? "UP",
         confidence: opts.stubConfidence ?? 0.91,
       });
+  } else if (judgeName === "twap") {
+    judge = twapJudge({ binanceBaseURL: e.BINANCE_BASE_URL?.trim(), takerFeeRate });
   } else {
     const provider = jevProviderFromEnv(e);
     const keyEnv =

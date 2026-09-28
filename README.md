@@ -118,6 +118,7 @@ Dry-run PnL is net of the taker fee and is booked only once Polymarket posts the
 
 | Var | Default | What it does |
 |-----|---------|--------------|
+| `JUDGE` | `jev` | `jev` or `twap` (fair-value model of the TWAP settlement; no key). Comment out `ACT_THRESHOLD`/`MAX_ASK` when using `twap` |
 | `JEV_PROVIDER` | auto | `typesafe` or `openrouter` (auto: `openrouter` when only `OPENROUTER_API_KEY` is set) |
 | `TYPESAFE_API_KEY` | — | Jev key for `typesafe` |
 | `OPENROUTER_API_KEY` | — | Jev key for `openrouter` |
