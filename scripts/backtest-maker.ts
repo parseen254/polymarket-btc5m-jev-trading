@@ -207,8 +207,8 @@ function simulate(
 
 async function main(): Promise<void> {
   // --ago shifts the test period back N days (out-of-sample checks).
-  const end = Math.floor(Date.now() / 1000 / 300) * 300 - 600 - arg("--ago", 0) * 86_400;
-  const start = end - days * 86_400;
+  const end = Math.floor(Date.now() / 1000 / 300) * 300 - 600 - Math.round((arg("--ago", 0) * 86_400) / 300) * 300;
+  const start = end - Math.round((days * 86_400) / 300) * 300; // whole 5m windows
   const all: number[] = [];
   for (let ts = start; ts < end; ts += 300) all.push(ts);
 

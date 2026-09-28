@@ -90,7 +90,7 @@ async function loadWindow(ts: number): Promise<Window | null> {
 
 async function main(): Promise<void> {
   const end = Math.floor(Date.now() / 1000 / 300) * 300 - 600; // skip unresolved
-  const start = end - days * 86_400;
+  const start = end - Math.round((days * 86_400) / 300) * 300; // whole 5m windows
   const all: number[] = [];
   for (let ts = start; ts < end; ts += 300) all.push(ts);
 
