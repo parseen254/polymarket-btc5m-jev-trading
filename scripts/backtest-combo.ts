@@ -185,6 +185,13 @@ async function main(): Promise<void> {
       prob: (p) => p.pTwap,
       gate: (p, side) => (side === "UP" ? jevCache[p.key]! : 1 - jevCache[p.key]!) >= 0.5,
     },
+    // Controls: is Jev just reporting which side of the open BTC is on?
+    { name: "sign", prob: (p) => (p.facts.btc.moveVsWindowOpenPct >= 0 ? 0.99 : 0.01) },
+    {
+      name: "twap+sign",
+      prob: (p) => p.pTwap,
+      gate: (p, side) => (p.facts.btc.moveVsWindowOpenPct >= 0) === (side === "UP"),
+    },
     { name: "blend 0.5", prob: (p) => 0.5 * p.pTwap + 0.5 * jevCache[p.key]! },
     { name: "blend 0.8", prob: (p) => 0.8 * p.pTwap + 0.2 * jevCache[p.key]! },
   ];
@@ -217,6 +224,10 @@ async function main(): Promise<void> {
   }
   console.log(`Taker sim: 1 share at price + ${halfSpread}, fee rate ${feeRate}, first qualifying point per window`);
   table(["rule", "θ", "trades", "win", "net $", "$/trade", "t"], rows);
+
+  // How often does Jev's favourite side simply equal the side of the open BTC is on?
+  const same = usable.filter((p) => (jevCache[p.key]! >= 0.5) === (p.facts.btc.moveVsWindowOpenPct >= 0)).length;
+  console.log(`Jev's favourite = side of the open BTC is on in ${pct(same / usable.length)} of points.`);
 }
 
 main().catch((err) => {

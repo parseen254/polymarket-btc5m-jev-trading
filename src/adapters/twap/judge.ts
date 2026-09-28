@@ -23,8 +23,16 @@ async function klines(base: string, interval: "1s" | "1m", startSec: number, end
  * (no LLM). It returns P(UP)/P(DOWN) and picks the side whose edge over its ask,
  * after the taker fee, is larger — so the policy's `P(win) ≥ ask + fee + MIN_EDGE`
  * check is the same rule the backtests used.
+ *
+ * followMove: always pick the side BTC is currently on vs the window open, so only
+ * trades that agree with the move pass the edge check. On Sep 25–28 this matched the
+ * Jev + TWAP combo (Jev's pick equals that side 98.5 % of the time) and beat plain TWAP.
  */
-export function twapJudge(opts: { binanceBaseURL?: string; takerFeeRate: number }): Judge {
+export function twapJudge(opts: {
+  binanceBaseURL?: string;
+  takerFeeRate: number;
+  followMove?: boolean;
+}): Judge {
   const base = (opts.binanceBaseURL || "https://api.binance.com").replace(/\/+$/, "");
   const sigmaByWindow = new Map<number, number>();
 
@@ -77,7 +85,9 @@ export function twapJudge(opts: { binanceBaseURL?: string; takerFeeRate: number 
         const p = side === "UP" ? pUp : 1 - pUp;
         return p - ask - takerFeePerShare(ask, opts.takerFeeRate);
       };
-      const side: Side = edge("UP") >= edge("DOWN") ? "UP" : "DOWN";
+      const side: Side = opts.followMove
+        ? facts.btc.moveVsWindowOpenPct >= 0 ? "UP" : "DOWN"
+        : edge("UP") >= edge("DOWN") ? "UP" : "DOWN";
       const pSide = side === "UP" ? pUp : 1 - pUp;
       const confidence = parseConfidence(Math.min(1, Math.max(1e-6, pSide)))!;
       return { side, confidence, probs: { UP: pUp, DOWN: 1 - pUp } };

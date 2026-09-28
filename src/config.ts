@@ -22,6 +22,7 @@ import type {
 
 export type EnvBag = {
   JUDGE?: string;
+  TWAP_FOLLOW_MOVE?: string;
   TYPESAFE_API_KEY?: string;
   OPENROUTER_API_KEY?: string;
   JEV_PROVIDER?: string;
@@ -149,7 +150,11 @@ export function loadConfig(
         confidence: opts.stubConfidence ?? 0.91,
       });
   } else if (judgeName === "twap") {
-    judge = twapJudge({ binanceBaseURL: e.BINANCE_BASE_URL?.trim(), takerFeeRate });
+    judge = twapJudge({
+      binanceBaseURL: e.BINANCE_BASE_URL?.trim(),
+      takerFeeRate,
+      followMove: e.TWAP_FOLLOW_MOVE === "1" || e.TWAP_FOLLOW_MOVE === "true",
+    });
   } else {
     const provider = jevProviderFromEnv(e);
     const keyEnv =
