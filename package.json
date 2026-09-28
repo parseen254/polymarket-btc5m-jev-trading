@@ -13,6 +13,7 @@
     "dryrun": "tsx scripts/dryrun-headless.ts",
     "calibrate": "tsx scripts/calibrate.ts",
     "backtest": "tsx scripts/backtest-history.ts",
+    "backtest:combo": "tsx scripts/backtest-combo.ts",
     "backtest:maker": "tsx scripts/backtest-maker.ts",
     "record:book": "tsx scripts/record-book.ts",
     "paper:maker": "tsx scripts/paper-maker.ts",
